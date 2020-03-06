@@ -16,6 +16,9 @@ import requests.sessions
 import xarray as xr
 from flask import Flask, request, make_response
 from flask_json import FlaskJSON
+from opencensus.ext.stackdriver import trace_exporter as stackdriver_exporter
+import opencensus.trace.tracer
+from opencensus.trace import config_integration
 
 import nwp.sounding.config as config
 
@@ -24,6 +27,14 @@ FlaskJSON(app)
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.DEBUG)
+
+# Metrics
+exporter = stackdriver_exporter.StackdriverExporter()
+tracer = opencensus.trace.tracer.Tracer(
+    exporter=exporter,
+    sampler=opencensus.trace.tracer.samplers.AlwaysOnSampler()
+)
+config_integration.trace_integrations(['requests'])
 
 
 def download_bz2(url, target_file, session=requests.sessions.Session()):
@@ -112,34 +123,45 @@ class AllLevelDataResult:
 
 def parameter_all_levels(model, latitude, longitude, run_hour, run_datetime, timestep,
                          parameter, level_type="model_level", base_level=60, top_level=1):
-    levels = list(range(base_level, top_level - 1, -1))
-    paths = [level_path(model, run_hour, run_datetime, timestep, parameter, level, level_type) for level in levels]
+    with tracer.span(name="download"):
+        levels = list(range(base_level, top_level - 1, -1))
+        paths = [level_path(model, run_hour, run_datetime, timestep, parameter, level, level_type) for level in levels]
 
-    session = requests.sessions.Session()
-    with concurrent.futures.ThreadPoolExecutor(max_workers=config.http_download_pool) as executor:
-        futures = list(executor.submit(download_file(path, session)) for path in paths)
-        concurrent.futures.wait(futures, timeout=None, return_when=ALL_COMPLETED)
+        session = requests.sessions.Session()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=config.http_download_pool) as executor:
+            futures = list(executor.submit(download_file(path, session)) for path in paths)
+            concurrent.futures.wait(futures, timeout=None, return_when=ALL_COMPLETED)
 
-    data_set = xr.open_mfdataset(paths, engine="cfgrib", concat_dim="generalVerticalLayer",
-                                 combine='nested', parallel=config.cfgrib_parallel)
-    interpolated = data_set.to_array()[0].interp(latitude=latitude, longitude=longitude)
-    data = AllLevelDataResult(interpolated.values, interpolated.time.values, interpolated.valid_time.values)
-    data_set.close()
+    with tracer.span(name="parsing"):
+        data_set = xr.open_mfdataset(paths, engine="cfgrib", concat_dim="generalVerticalLayer",
+                                     combine='nested', parallel=config.cfgrib_parallel)
+        interpolated = data_set.to_array()[0].interp(latitude=latitude, longitude=longitude)
+        data = AllLevelDataResult(interpolated.values, interpolated.time.values, interpolated.valid_time.values)
+        data_set.close()
     return data
+
 
 @app.route("/<float:latitude>/<float:longitude>/<int:run_hour>/<int:run_datetime>/<int:timestep>/<parameter>")
 def sounding(latitude, longitude, run_hour, run_datetime, timestep, parameter):
-    level_type = request.args.get("level_type", "model_level")
-    base_level = int(request.args.get("base", "60"))
-    top_level = int(request.args.get("top", "1"))
+    with tracer.span(name="sounding") as span:
+        span.add_attribute("latitude", str(latitude))
+        span.add_attribute("longitude", str(longitude))
+        span.add_attribute("run_hour", str(run_hour))
+        span.add_attribute("run_datetime", str(run_datetime))
+        span.add_attribute("timestep", str(timestep))
+        span.add_attribute("parameter", str(parameter))
 
-    sounding = parameter_all_levels(config.model, latitude, longitude,
-                                    run_hour, run_datetime, int(timestep),
-                                    parameter, level_type, base_level, top_level)
+        level_type = request.args.get("level_type", "model_level")
+        base_level = int(request.args.get("base", "60"))
+        top_level = int(request.args.get("top", "1"))
 
-    response = make_response(json.dumps(sounding.__dict__))
-    response.mimetype = 'application/json'
-    return response
+        sounding = parameter_all_levels(config.model, latitude, longitude,
+                                        run_hour, run_datetime, int(timestep),
+                                        parameter, level_type, base_level, top_level)
+
+        response = make_response(json.dumps(sounding.__dict__))
+        response.mimetype = 'application/json'
+        return response
 
 
 if __name__ == "__main__":
