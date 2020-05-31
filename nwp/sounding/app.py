@@ -141,7 +141,7 @@ def parameter_all_levels(model, latitude, longitude, run_hour, run_datetime, tim
     return data
 
 
-@app.route("/<float:latitude>/<float:longitude>/<int:run_hour>/<int:run_datetime>/<int:timestep>/<parameter>")
+@app.route("/<float:latitude>/<float(signed=True):longitude>/<int:run_hour>/<int:run_datetime>/<int:timestep>/<parameter>")
 def sounding(latitude, longitude, run_hour, run_datetime, timestep, parameter):
     with tracer.span(name="sounding") as span:
         span.add_attribute("latitude", str(latitude))
