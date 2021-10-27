@@ -1,5 +1,5 @@
 cfgrib==0.9.7.7
-dask==2.11.0
+dask==2021.10.0
 Flask==1.1.1
 Flask-JSON==0.3.4
 geopy==1.21.0
